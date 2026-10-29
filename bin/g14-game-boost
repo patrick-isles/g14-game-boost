@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Tool: g14-game-boost
+# Purpose: High-performance Linux gaming & Proton launcher for ASUS ROG Zephyrus G14
+# Hardware: AMD Ryzen 9 6900HS + AMD Radeon RX 6700S (Navi 23)
+# Author: Patrick Isles
+# ==============================================================================
+
+set -eo pipefail
+
+VERSION="1.0.0"
+
+# Target Hardware IDs
+DGPU_PCI_ID="1002:73ef"
+
+# ANSI Colors
+C_BOLD="\033[1m"
+C_RESET="\033[0m"
+C_CYAN="\033[36m"
+C_RED="\033[31m"
+C_GREEN="\033[32m"
+C_YELLOW="\033[33m"
+C_MAGENTA="\033[35m"
+C_DIM="\033[2m"
+
+print_banner() {
+    cat << "EOF"
+  ██████╗  ██╗██╗  ██╗       ██████╗  █████╗ ███╗   ███╗███████╗
+ ██╔════╝ ███║██║  ██║      ██╔════╝ ██╔══██╗████╗ ████║██╔════╝
+ ██║  ███╗╚██║███████║█████╗██║  ███╗███████║██╔████╔██║█████╗  
+ ██║   ██║ ██║╚════██║╚════╝██║   ██║██╔══██║██║╚██╔╝██║██╔══╝  
+ ╚██████╔╝ ██║     ██║      ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗
+  ╚═════╝  ╚═╝     ╚═╝       ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
+      ASUS ROG Zephyrus G14 (GA402RJ) Gaming & Proton Optimizer
+EOF
+}
+
+get_cpu_temp() {
+    for hwmon in /sys/class/hwmon/hwmon*; do
+        if [[ -f "$hwmon/name" ]] && grep -q "k10temp" "$hwmon/name"; then
+            if [[ -f "$hwmon/temp1_input" ]]; then
+                echo "$(( $(cat "$hwmon/temp1_input") / 1000 ))°C"
+                return
+            fi
+        fi
+    done
+    echo "N/A"
+}
+
+get_gpu_temp() {
+    for hwmon in /sys/class/hwmon/hwmon*; do
+        if [[ -f "$hwmon/name" ]] && grep -q "amdgpu" "$hwmon/name"; then
+            # Search for the dGPU (hwmon device associated with Navi 23)
+            if [[ -f "$hwmon/device/device" ]] && grep -q "$DGPU_PCI_ID" "$hwmon/device/device" 2>/dev/null; then
+                if [[ -f "$hwmon/temp1_input" ]]; then
+                    echo "$(( $(cat "$hwmon/temp1_input") / 1000 ))°C"
+                    return
+                fi
+            fi
+        fi
+    done
+    # Fallback to first amdgpu sensor
+    for hwmon in /sys/class/hwmon/hwmon*; do
+        if [[ -f "$hwmon/name" ]] && grep -q "amdgpu" "$hwmon/name" && [[ -f "$hwmon/temp1_input" ]]; then
+            echo "$(( $(cat "$hwmon/temp1_input") / 1000 ))°C"
+            return
+        fi
+    done
+    echo "N/A"
+}
+
+get_cpu_freq() {
+    if [[ -f "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq" ]]; then
+        echo "$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq) / 1000 )) MHz"
+    else
+        echo "N/A"
+    fi
+}
+
+cmd_status() {
+    print_banner
+    echo ""
+    echo -e "${C_BOLD}--- LIVE HARDWARE & ENGINE STATUS ---${C_RESET}"
+    echo -e "  • ${C_CYAN}Platform:${C_RESET}       ASUS ROG Zephyrus G14 (GA402RJ)"
+    echo -e "  • ${C_CYAN}CPU:${C_RESET}            AMD Ryzen 9 6900HS (Rembrandt Zen 3+)"
+    echo -e "  • ${C_CYAN}CPU Clock:${C_RESET}      $(get_cpu_freq)"
+    echo -e "  • ${C_CYAN}CPU Temp:${C_RESET}       $(get_cpu_temp)"
+    echo -e "  • ${C_CYAN}dGPU Target:${C_RESET}    AMD Radeon RX 6700S [${DGPU_PCI_ID}]"
+    echo -e "  • ${C_CYAN}dGPU Temp:${C_RESET}      $(get_gpu_temp)"
+    
+    local gov="unknown"
+    [[ -f "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" ]] && gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    echo -e "  • ${C_CYAN}CPU Governor:${C_RESET}   ${C_GREEN}${gov}${C_RESET}"
+
+    local cache_size="0M"
+    if [[ -d "$HOME/.cache/mesa_shader_cache" ]]; then
+        cache_size=$(du -sh "$HOME/.cache/mesa_shader_cache" 2>/dev/null | awk '{print $1}')
+    fi
+    echo -e "  • ${C_CYAN}Mesa Shaders:${C_RESET}   ${cache_size} in ~/.cache/mesa_shader_cache"
+
+    local gm="Not Found"
+    command -v gamemoderun &>/dev/null && gm="${C_GREEN}Active (Feral GameMode)${C_RESET}"
+    echo -e "  • ${C_CYAN}GameMode:${C_RESET}       ${gm}"
+    echo ""
+}
+
+cmd_env() {
+    echo -e "${C_BOLD}Active Environment Scaffolding for Proton & Vulkan:${C_RESET}"
+    echo 'export DRI_PRIME="1002:73ef!"'
+    echo 'export MESA_VK_DEVICE_SELECT="1002:73ef!"'
+    echo 'export RADV_PERFTEST="gpl"'
+    echo 'export PROTON_ENABLE_NVAPI=0'
+    echo 'export DXVK_ASYNC=1'
+    echo 'export MESA_SHADER_CACHE_MAX_SIZE="10G"'
+    echo 'export VKD3D_CONFIG="dxr"'
+}
+
+cmd_clean_cache() {
+    echo -e "==> Cleaning Mesa shader cache..."
+    rm -rf "$HOME/.cache/mesa_shader_cache"*
+    mkdir -p "$HOME/.cache/mesa_shader_cache"
+    echo -e "${C_GREEN}✓ Mesa shader cache cleared successfully.${C_RESET}"
+}
+
+cmd_run() {
+    if [[ $# -eq 0 ]]; then
+        echo -e "${C_RED}[-] Error: No command provided to run.${C_RESET}" >&2
+        echo "Usage: g14-game-boost run <game_executable_or_command>" >&2
+        exit 1
+    fi
+
+    echo -e "${C_BOLD}==> [g14-game-boost] Engaging High-Performance Scaffolding...${C_RESET}"
+    echo -e "    CPU Temp: $(get_cpu_temp) | dGPU Temp: $(get_gpu_temp) | Clock: $(get_cpu_freq)"
+    
+    # 1. Enforce dGPU targeting (Bypass 680M iGPU)
+    export DRI_PRIME="${DGPU_PCI_ID}!"
+    export MESA_VK_DEVICE_SELECT="${DGPU_PCI_ID}!"
+    
+    # 2. Mesa RADV Shader Optimization (GPL kills stutter in UE5/DirectX 12)
+    export RADV_PERFTEST="gpl"
+    export MESA_SHADER_CACHE_MAX_SIZE="10G"
+    export DXVK_ASYNC=1
+    
+    # 3. Disable Nvidia hooks & enable DX12 raytracing features
+    export PROTON_ENABLE_NVAPI=0
+    export VKD3D_CONFIG="dxr"
+
+    local START_TIME=$(date +%s)
+    echo -e "    Targeting dGPU [${DGPU_PCI_ID}] with RADV GPL Pipeline."
+    echo -e "${C_GREEN}==> Launching Game: $*${C_RESET}"
+    echo ""
+
+    # Wrap inside systemd-inhibit to block desktop sleep/screen dimming while gaming
+    local LAUNCHER=()
+    if command -v systemd-inhibit &>/dev/null; then
+        LAUNCHER+=(systemd-inhibit --what=idle:sleep --who="g14-game-boost" --why="Zephyrus G14 Gaming Session")
+    fi
+
+    if command -v gamemoderun &>/dev/null; then
+        LAUNCHER+=(gamemoderun)
+    fi
+
+    # Execute game process
+    "${LAUNCHER[@]}" "$@"
+
+    local END_TIME=$(date +%s)
+    local DURATION=$(( END_TIME - START_TIME ))
+    local MINUTES=$(( DURATION / 60 ))
+    local SECONDS=$(( DURATION % 60 ))
+
+    echo ""
+    echo -e "${C_BOLD}==> [g14-game-boost] Session Terminated.${C_RESET}"
+    echo -e "    Duration: ${MINUTES}m ${SECONDS}s"
+    echo -e "    Exit CPU Temp: $(get_cpu_temp) | Exit dGPU Temp: $(get_gpu_temp)"
+}
+
+case "${1:-}" in
+    status)
+        cmd_status
+        ;;
+    env)
+        cmd_env
+        ;;
+    clean-cache)
+        cmd_clean_cache
+        ;;
+    run)
+        shift
+        cmd_run "$@"
+        ;;
+    *)
+        print_banner
+        echo ""
+        echo "Usage: g14-game-boost <command> [options]"
+        echo ""
+        echo "Commands:"
+        echo "  status       Display live CPU/dGPU thermals, clocks, and gaming telemetry"
+        echo "  run <cmd>    Execute game with full dGPU, RADV GPL, and power optimizations"
+        echo "  env          Display active Proton/Vulkan environment exports"
+        echo "  clean-cache  Clean and reset Mesa shader cache"
+        echo ""
+        echo "Steam Launch Option:"
+        echo "  g14-game-boost run %command%"
+        echo ""
+        exit 0
+        ;;
+esac
